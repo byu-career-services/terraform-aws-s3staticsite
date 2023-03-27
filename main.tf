@@ -98,6 +98,64 @@ resource "aws_cloudfront_distribution" "cdn" {
     minimum_protocol_version = "TLSv1.2_2019"
   }
 
+  custom_error_response {
+    error_caching_min_ttl = 10
+    error_code            = 403
+    response_code         = 200
+    response_page_path    = "/index.html"
+  }
+  custom_error_response {
+    error_caching_min_ttl = 10
+    error_code            = 404
+    response_code         = 200
+    response_page_path    = "/index.html"
+  }
+
+  origin {
+    connection_attempts = 3
+    connection_timeout  = 10
+    domain_name         = "job-search-dev.byu-dept-careerservices-dev.amazon.byu.edu"
+    origin_id           = "server"
+
+    custom_origin_config {
+      http_port                = 80
+      https_port               = 443
+      origin_keepalive_timeout = 5
+      origin_protocol_policy   = "https-only"
+      origin_read_timeout      = 30
+      origin_ssl_protocols     = ["TLSv1.2"]
+    }
+  }
+
+  ordered_cache_behavior {
+    allowed_methods = [
+      "DELETE",
+      "GET",
+      "HEAD",
+      "OPTIONS",
+      "PATCH",
+      "POST",
+      "PUT",
+    ]
+    cache_policy_id = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+    cached_methods = [
+      "GET",
+      "HEAD",
+      "OPTIONS",
+    ]
+    compress                 = false
+    default_ttl              = 0
+    max_ttl                  = 0
+    min_ttl                  = 0
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3"
+    path_pattern             = "/api*"
+    smooth_streaming         = false
+    target_origin_id         = "server"
+    trusted_key_groups       = []
+    trusted_signers          = []
+    viewer_protocol_policy   = "redirect-to-https"
+  }
+
   wait_for_deployment = var.wait_for_deployment
   tags                = var.tags
 }
