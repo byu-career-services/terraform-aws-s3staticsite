@@ -5,6 +5,10 @@ terraform {
       source  = "hashicorp/aws"
       version = ">= 4.48.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.0"
+    }
   }
 }
 
@@ -43,21 +47,47 @@ resource "aws_route53_record" "cert_validation" {
   ttl      = 60
 }
 
-resource "aws_cloudfront_origin_access_control" "oac" {
-  name                              = aws_s3_bucket.website.bucket
-  description                       = "Lock down access to static site"
-  origin_access_control_origin_type = "s3"
-  signing_behavior                  = "always"
-  signing_protocol                  = "sigv4"
+resource "random_string" "cf_key" {
+  length  = 32
+  special = false
+}
+
+# https://github.com/hashicorp/terraform-provider-aws/issues/30951#issuecomment-1523376909
+resource "aws_s3_bucket_public_access_block" "logging_bucket_public_enabled" {
+  bucket                  = aws_s3_bucket.logging.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "logging_bucket_ownership" {
+  depends_on = [aws_s3_bucket_public_access_block.logging_bucket_public_enabled]
+  bucket     = aws_s3_bucket.logging.id
+  rule {
+    object_ownership = "BucketOwnerPreferred"
+  }
 }
 
 resource "aws_cloudfront_distribution" "cdn" {
+  depends_on  = [aws_s3_bucket_ownership_controls.logging_bucket_ownership]
   price_class = var.cloudfront_price_class
   origin {
-    domain_name              = aws_s3_bucket.website.bucket_regional_domain_name
-    origin_id                = aws_s3_bucket.website.bucket
-    origin_path              = var.origin_path
-    origin_access_control_id = aws_cloudfront_origin_access_control.oac.id
+    domain_name = aws_s3_bucket_website_configuration.website_config.website_endpoint
+    origin_id   = aws_s3_bucket.website.bucket
+    origin_path = var.origin_path
+
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "http-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+
+    custom_header {
+      name  = "Referer"
+      value = random_string.cf_key.result
+    }
   }
 
   comment             = "CDN for ${var.site_url}"
@@ -216,16 +246,18 @@ resource "aws_route53_record" "additional_4a" {
 
 resource "aws_s3_bucket" "website" {
   bucket        = var.s3_bucket_name
-  tags          = var.tags
+  tags          = merge({ "divvy-ignore-s3-public" = "true" }, var.tags)
   force_destroy = var.force_destroy
 }
 
-resource "aws_s3_bucket_public_access_block" "block_public_access" {
-  bucket                  = aws_s3_bucket.website.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
+resource "aws_s3_bucket_website_configuration" "website_config" {
+  bucket = aws_s3_bucket.website.id
+  index_document {
+    suffix = var.index_doc
+  }
+  error_document {
+    key = var.error_doc
+  }
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "website_lifecycle" {
@@ -267,43 +299,52 @@ resource "aws_s3_bucket_cors_configuration" "cors_config" {
   }
 }
 
-
 data "aws_iam_policy_document" "static_website" {
   statement {
-    actions = ["s3:GetObject"]
-
+    sid       = "1"
+    actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.website.arn}/*"]
 
     principals {
-      type        = "Service"
-      identifiers = ["cloudfront.amazonaws.com"]
+      identifiers = ["*"]
+      type        = "AWS"
     }
+
     condition {
-      test     = "StringEquals"
-      variable = "AWS:SourceArn"
-      values   = [aws_cloudfront_distribution.cdn.arn]
+      test     = "StringLike"
+      values   = [random_string.cf_key.result]
+      variable = "aws:Referer"
     }
   }
 }
 
+# https://github.com/hashicorp/terraform-provider-aws/issues/30951#issuecomment-1523376909
+resource "aws_s3_bucket_public_access_block" "website_bucket_public_enabled" {
+  bucket                  = aws_s3_bucket.website.id
+  block_public_acls       = true
+  block_public_policy     = false
+  ignore_public_acls      = true
+  restrict_public_buckets = false
+}
+
+resource "aws_s3_bucket_ownership_controls" "website_bucket_ownership" {
+  depends_on = [aws_s3_bucket_public_access_block.website_bucket_public_enabled]
+  bucket     = aws_s3_bucket.website.id
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
 
 resource "aws_s3_bucket_policy" "static_website_read" {
-  bucket = aws_s3_bucket.website.id
-  policy = data.aws_iam_policy_document.static_website.json
+  depends_on = [aws_s3_bucket_ownership_controls.website_bucket_ownership]
+  bucket     = aws_s3_bucket.website.id
+  policy     = data.aws_iam_policy_document.static_website.json
 }
 
 resource "aws_s3_bucket" "logging" {
   bucket        = "${var.s3_bucket_name}-access-logs"
   tags          = var.tags
   force_destroy = var.force_destroy
-}
-
-resource "aws_s3_bucket_public_access_block" "block_public_access_logging" {
-  bucket                  = aws_s3_bucket.logging.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "logging_bucket_lifecycle" {
